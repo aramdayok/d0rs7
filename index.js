@@ -251,9 +251,10 @@ function getRepository(storageModel, storageType) {
                     const githubGist_token = process.env.githubGist_token ?? "";
                     const githubGist_username = process.env.githubGist_username ?? "";
                     const encryption_password = process.env.encryption_password ?? "";
-                    repository = new GitHubGistRepositoryImpl_1.QueuedGitHubGistRepository({ token: githubGist_token, username: githubGist_username }, storageModel, encryption_password);
+                    const appId = process.env.appId ?? "";
+                    repository = new GitHubGistRepositoryImpl_1.QueuedGitHubGistRepository({ token: githubGist_token, username: githubGist_username }, storageModel, appId, encryption_password);
                 default: // add more cases for other repository types as needed
-                    log.error(`Invalid repository name: ${storageType}`);
+                //log.error(`Invalid repository name: ${storageType}`);
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
         }
@@ -1200,16 +1201,17 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.handleChatMessage = handleChatMessage;
+exports.handleDeleteChat = handleDeleteChat;
+exports.handleDeleteMessage = handleDeleteMessage;
 exports.handleEditMessage = handleEditMessage;
 exports.handleReactMessage = handleReactMessage;
-exports.handleDeleteMessage = handleDeleteMessage;
-exports.handleDeleteChat = handleDeleteChat;
+exports.handleUpdateChatState = handleUpdateChatState;
 exports.handleUpdateNotice = handleUpdateNotice;
 const config_1 = __nccwpck_require__(47163);
 const logger_1 = __importDefault(__nccwpck_require__(60425));
 const ClientError_1 = __nccwpck_require__(5764);
-const SocketEvents_1 = __nccwpck_require__(11496);
 const User_1 = __nccwpck_require__(59163);
+const SocketEvents_1 = __nccwpck_require__(11496);
 const log = (0, logger_1.default)(__filename);
 // Define the handler function for the "chatMessage" event
 async function handleChatMessage(message, callback, socket) {
@@ -1384,6 +1386,15 @@ async function handleDeleteMessage(id, socket, callback) {
 async function handleUpdateNotice(socket, callback) {
     try {
         socket.broadcast.emit(SocketEvents_1.socketEvents.updateNotice);
+        callback(JSON.stringify({ success: true }));
+    }
+    catch (err) {
+        log.error(err);
+    }
+}
+async function handleUpdateChatState(socket, callback) {
+    try {
+        socket.broadcast.emit(SocketEvents_1.socketEvents.changedChatState);
         callback(JSON.stringify({ success: true }));
     }
     catch (err) {
@@ -1921,6 +1932,7 @@ const CryptoJS = __importStar(__nccwpck_require__(34134));
 class QueuedGitHubGistRepository {
     credentials;
     encryptionPassword;
+    appId;
     modelName;
     gistId = null;
     // Queue system
@@ -1936,11 +1948,12 @@ class QueuedGitHubGistRepository {
         lastBatchTime: 0,
         queueLength: 0
     };
-    constructor(credentials, modelName, encryptionPassword) {
+    constructor(credentials, appId, modelName, encryptionPassword) {
         this.credentials = credentials;
+        this.appId = appId;
         this.modelName = modelName;
         this.encryptionPassword = encryptionPassword;
-        console.log(`🚀 Queued GitHub Gist Repository: ${modelName}`);
+        console.log(`🚀 Queued GitHub Gist Repository: ${appId}/${modelName}`);
         // Start background batch processor
         this.startBatchProcessor();
         // No initial data loading needed - will load on-demand
@@ -2128,13 +2141,14 @@ class QueuedGitHubGistRepository {
     // Find our storage gist
     async findStorageGist() {
         try {
-            const response = await this.makeGitHubRequest(`https://api.github.com/users/${this.credentials.username}/gists`);
+            const response = await this.makeGitHubRequest(`https://api.github.com/gists`);
             if (!response.ok) {
                 throw new Error(`GitHub API error: ${response.status}`);
             }
             const gists = await response.json();
-            const storageGist = gists.find(gist => gist.description === `Storage_${this.modelName}` ||
-                gist.description.includes(`Storage_${this.modelName}`));
+            const storageKey = `Storage_${this.appId}_${this.modelName}`;
+            const storageGist = gists.find(gist => gist.description === storageKey ||
+                gist.description.includes(storageKey));
             return storageGist || null;
         }
         catch (error) {
@@ -2161,7 +2175,7 @@ class QueuedGitHubGistRepository {
                 throw new Error(`Failed to read gist: ${response.status}`);
             }
             const gist = await response.json();
-            const filename = `${this.modelName.toLowerCase()}-data.json`;
+            const filename = `${this.appId.toLowerCase()}-${this.modelName.toLowerCase()}-data.json`;
             const file = gist.files[filename];
             if (!file) {
                 return [];
@@ -2180,7 +2194,7 @@ class QueuedGitHubGistRepository {
         const allData = { [this.modelName]: data };
         const jsonData = JSON.stringify(allData, null, 2);
         const encrypted = this.encrypt(jsonData);
-        const filename = `${this.modelName.toLowerCase()}-data.json`;
+        const filename = `${this.appId.toLowerCase()}-${this.modelName.toLowerCase()}-data.json`;
         try {
             if (this.gistId) {
                 // Update existing gist
@@ -2204,7 +2218,7 @@ class QueuedGitHubGistRepository {
             else {
                 // Create new gist
                 const gistData = {
-                    description: `Storage_${this.modelName}`,
+                    description: `Storage_${this.appId}_${this.modelName}`,
                     public: false,
                     files: {
                         [filename]: {
@@ -2309,7 +2323,7 @@ class QueuedGitHubGistRepository {
         try {
             const response = await this.makeGitHubRequest('https://api.github.com/rate_limit');
             const data = await response.json();
-            console.log(`📊 GitHub API Rate Limit: ${data.core.remaining}/${data.core.limit} requests remaining`);
+            console.log(`📊 GitHub API Rate Limit: ${data.resources.core.remaining}/${data.resources.core.limit} requests remaining`);
             return data;
         }
         catch (error) {
@@ -2327,11 +2341,16 @@ exports.QueuedGitHubGistRepository = QueuedGitHubGistRepository;
  *   username: 'your_github_username'
  * };
  *
+ * // Each app uses unique appId to avoid conflicts
  * const userRepo = new QueuedGitHubGistRepository<User>(
  *   credentials,
- *   'User',
+ *   'MyApp',        // appId - unique per application
+ *   'User',         // modelName
  *   'your_encryption_password'
  * );
+ *
+ * // Creates gist: Storage_MyApp_User
+ * // Filename: myapp-user-data.json
  *
  * // All operations are instant (queued)
  * await userRepo.add({ name: 'John' });    // Returns immediately
@@ -2349,7 +2368,7 @@ exports.QueuedGitHubGistRepository = QueuedGitHubGistRepository;
  *
  * // Check GitHub rate limits
  * await userRepo.getRateLimitStatus();
- */ 
+ */
 
 
 /***/ }),
@@ -2870,6 +2889,9 @@ function socketService(io) {
         socket.on(SocketEvents_1.socketEvents.triggerTyping, (user, callback) => {
             (0, userHandler_1.handleTriggerTyping)(user, socket, callback);
         });
+        socket.on(SocketEvents_1.socketEvents.changeChatState, (callback) => {
+            (0, chatHandler_1.handleUpdateChatState)(socket, callback);
+        });
     };
     // Attach the connection event handler to the Socket.IO server
     io.on("connection", onConnection);
@@ -3064,6 +3086,8 @@ exports.socketEvents = {
     changedStatus: "changedStatus",
     triggerTyping: "triggerTyping",
     typingMessage: "typingMessage",
+    changeChatState: "changeChatState",
+    changedChatState: "changedChatState",
 };
 
 
